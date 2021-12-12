@@ -1,8 +1,8 @@
 #!/bin/sh
 
 # This script sets up the OS update and Rocket Pool update collector, along with
-# integration with Prometheus's node-exporter and auto-running during apt or dnf
-# executions.
+# integration with Prometheus's node-exporter and auto-running during apt, dnf
+# or yay executions.
 
 
 # The path that the node exporter will be configured to look for textfiles in
@@ -34,6 +34,8 @@ if [ "$PLATFORM" = "Linux" ]; then
             INSTALLER="apt"
         elif [ $(echo $OS_ID | grep -c -E "fedora|rhel|centos") -gt "0" ]; then
             INSTALLER="dnf"
+        elif [ $(echo $OS_ID | grep -c -E "arch|endeavouros|antegros") -gt "0" ]; then
+            INSTALLER="yay"
         fi
 
     # Fall back to `lsb_release`
@@ -50,6 +52,8 @@ if [ "$PLATFORM" = "Linux" ]; then
         INSTALLER="dnf"
     elif [ -f "/etc/fedora-release" ]; then
         INSTALLER="dnf"
+    elif [ -f "/etc/arch-release" ]; then
+        INSTALLER="yay"
     fi
     
 fi
@@ -62,6 +66,17 @@ if [ "$INSTALLER" == "dnf" ]; then
             INSTALLER="yum"
         else
             fail "You're using a Fedora / CentOS / RHEL system ($OS_ID) but DNF or YUM don't seem to be installed.";
+        fi
+    fi
+fi
+
+# Check for YAY
+if [ "$INSTALLER" == "yay" ]; then
+    if ! command -v yay &>/dev/null; then
+        if command -v pacman &>/dev/null ; then
+            INSTALLER="pacman"
+        else
+            fail "You're using an ArchLinux system ($OS_ID) but YAY or pacman don't seem to be installed.";
         fi
     fi
 fi
@@ -201,6 +216,104 @@ case "$INSTALLER" in
 
     # Legacy CentOS / Fedora / RHEL with Yum
     yum)
+
+        # The total number of steps in the installation process
+        TOTAL_STEPS="4"
+
+        # Install dependencies
+        progress 1 "Installing dependencies..."
+        { sudo yum -y check-update; } >&2echo
+        { sudo yum -y install yum-utils || fail "Could not install OS dependencies.";  } >&2
+        # CentOS 7 requires epel-release, but ignore it if it doesn't exist for others
+        { sudo yum -y install epel-release  || true; } >&2
+        { sudo yum -y install moreutils || fail "Could not install moreutils.";  } >&2
+
+        # Download and extract package files
+        progress 2 "Downloading Rocket Pool update tracker package files..."
+        { curl -L "$PACKAGE_URL" | tar -xJ -C "$TEMPDIR" || fail "Could not download and extract the Rocket Pool update tracker package files."; } >&2
+        { test -d "$PACKAGE_FILES_PATH" || fail "Could not extract the Rocket Pool update tracker package files."; } >&2
+
+        # Install the update tracker files
+        progress 3 "Installing update tracker..."
+        { sudo mkdir -p "$TEXTFILE_COLLECTOR_PATH" || fail "Could not create textfile collector path."; } >&2
+        { sudo mv "$PACKAGE_FILES_PATH/yum/yum-metrics.sh" "$UPDATE_SCRIPT_PATH" || fail "Could not move yum update collector."; } >&2
+        { sudo mv "$PACKAGE_FILES_PATH/rp-version-check.sh" "$UPDATE_SCRIPT_PATH" || fail "Could not move Rocket Pool update collector."; } >&2
+        { sudo mv "$PACKAGE_FILES_PATH/yum/rp-yum-check.sh" "$UPDATE_SCRIPT_PATH" || fail "Could not move update tracker script."; } >&2
+        { sudo mv "$PACKAGE_FILES_PATH/yum/rp-update-tracker.service" "/etc/systemd/system" || fail "Could not move update tracker service."; } >&2
+        { sudo mv "$PACKAGE_FILES_PATH/yum/rp-update-tracker.timer" "/etc/systemd/system" || fail "Could not move update tracker timer."; } >&2
+        { sudo chmod +x "$UPDATE_SCRIPT_PATH/yum-metrics.sh" || fail "Could not set permissions on dnf update collector."; } >&2
+        { sudo chmod +x "$UPDATE_SCRIPT_PATH/rp-version-check.sh" || fail "Could not set permissions on Rocket Pool update collector."; } >&2
+        { sudo chmod +x "$UPDATE_SCRIPT_PATH/rp-yum-check.sh" || fail "Could not set permissions on Rocket Pool update tracker script."; } >&2
+
+        # Install the update checking service
+        progress 4 "Installing update tracker service..."
+        if [ "$SELINUX" = true ]; then
+            echo -e "${COLOR_YELLOW}Your system has SELinux enabled, so Rocket Pool can't automatically start the update tracker service."
+            echo "Please run the following commands manually:"
+            echo ""
+            echo -e '\tsudo restorecon /usr/share/rp-yum-check.sh /usr/share/rp-version-check.sh /etc/systemd/system/rp-update-tracker.service /etc/systemd/system/rp-update-tracker.timer'
+            echo -e '\tsudo systemctl enable rp-update-tracker'
+            echo -e '\tsudo systemctl start rp-update-tracker'
+            echo -e "${COLOR_RESET}"
+        else
+            { sudo systemctl daemon-reload || fail "Couldn't update systemctl daemons."; } >&2
+            { sudo systemctl enable rp-update-tracker || fail "Couldn't enable update tracker service."; } >&2
+            { sudo systemctl start rp-update-tracker || fail "Couldn't start update tracker service."; } >&2
+        fi
+
+    ;;
+
+    # Distros using yay
+    yay)
+
+        # The total number of steps in the installation process
+        TOTAL_STEPS="4"
+
+        # Install dependencies
+        progress 1 "Installing dependencies..."
+        { yay -Sy; } >&2
+        { sudo dnf -y install dnf-utils || fail "Could not install OS dependencies.";  } >&2
+        # PowerTools and epel-release are needed for CentOS 8 to install moreutils, but it will fail for e.g. Fedora
+        { sudo dnf config-manager --set-enabled powertools || true; } >&2
+        { sudo dnf -y install epel-release || true;  } >&2
+        { sudo dnf -y install moreutils || fail "Could not install moreutils.";  } >&2
+
+        # Download and extract package files
+        progress 2 "Downloading Rocket Pool update tracker package files..."
+        { curl -L "$PACKAGE_URL" | tar -xJ -C "$TEMPDIR" || fail "Could not download and extract the Rocket Pool update tracker package files."; } >&2
+        { test -d "$PACKAGE_FILES_PATH" || fail "Could not extract the Rocket Pool update tracker package files."; } >&2
+
+        # Install the update tracker files
+        progress 3 "Installing update tracker..."
+        { sudo mkdir -p "$TEXTFILE_COLLECTOR_PATH" || fail "Could not create textfile collector path."; } >&2
+        { sudo mv "$PACKAGE_FILES_PATH/dnf/dnf-metrics.sh" "$UPDATE_SCRIPT_PATH" || fail "Could not move dnf update collector."; } >&2
+        { sudo mv "$PACKAGE_FILES_PATH/rp-version-check.sh" "$UPDATE_SCRIPT_PATH" || fail "Could not move Rocket Pool update collector."; } >&2
+        { sudo mv "$PACKAGE_FILES_PATH/dnf/rp-dnf-check.sh" "$UPDATE_SCRIPT_PATH" || fail "Could not move update tracker script."; } >&2
+        { sudo mv "$PACKAGE_FILES_PATH/dnf/rp-update-tracker.service" "/etc/systemd/system" || fail "Could not move update tracker service."; } >&2
+        { sudo mv "$PACKAGE_FILES_PATH/dnf/rp-update-tracker.timer" "/etc/systemd/system" || fail "Could not move update tracker timer."; } >&2
+        { sudo chmod +x "$UPDATE_SCRIPT_PATH/dnf-metrics.sh" || fail "Could not set permissions on dnf update collector."; } >&2
+        { sudo chmod +x "$UPDATE_SCRIPT_PATH/rp-version-check.sh" || fail "Could not set permissions on Rocket Pool update collector."; } >&2
+        { sudo chmod +x "$UPDATE_SCRIPT_PATH/rp-dnf-check.sh" || fail "Could not set permissions on Rocket Pool update tracker script."; } >&2
+
+        # Install the update checking service
+        progress 4 "Installing update tracker service..."
+        if [ "$SELINUX" = true ]; then
+            echo -e "${COLOR_YELLOW}Your system has SELinux enabled, so Rocket Pool can't automatically start the update tracker service."
+            echo "Please run the following commands manually:"
+            echo ""
+            echo -e '\tsudo restorecon /usr/share/rp-dnf-check.sh /usr/share/rp-version-check.sh /etc/systemd/system/rp-update-tracker.service /etc/systemd/system/rp-update-tracker.timer'
+            echo -e '\tsudo systemctl enable rp-update-tracker'
+            echo -e '\tsudo systemctl start rp-update-tracker'
+            echo -e "${COLOR_RESET}"
+        else
+            { sudo systemctl daemon-reload || fail "Couldn't update systemctl daemons."; } >&2
+            { sudo systemctl enable rp-update-tracker || fail "Couldn't enable update tracker service."; } >&2
+            { sudo systemctl start rp-update-tracker || fail "Couldn't start update tracker service."; } >&2
+        fi
+    ;;
+
+    # Legacy ArchLinux
+    pacman)
 
         # The total number of steps in the installation process
         TOTAL_STEPS="4"
